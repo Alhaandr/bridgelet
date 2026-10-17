@@ -305,9 +305,10 @@ export function createDeduplicationStore(
       prune(now);
       if (seen.has(key)) {
         // Refresh recency so a hot claim is not evicted by the cap while
-        // older idle claims are.
+        // older idle claims are, but preserve recordedAt so TTL expiry is preserved.
+        const recordedAt = seen.get(key)!;
         seen.delete(key);
-        seen.set(key, now);
+        seen.set(key, recordedAt);
         return true;
       }
       seen.set(key, now);
@@ -453,10 +454,23 @@ export const conditional = {
   amountUsdEquiv: (amountUsdEquiv: number): EventProps => ({
     amount_usd_equiv: amountUsdEquiv,
   }),
-  expiryDays: (expiryDays: ExpiryDays): EventProps => ({ expiry_days: expiryDays }),
-  errorType: (errorType: ErrorType): EventProps => ({ error_type: errorType }),
+  expiryDays: (expiryDays: ExpiryDays | number): EventProps => ({ expiry_days: expiryDays }),
+  errorType: (errorType: ErrorType | string): EventProps => ({ error_type: errorType }),
   errorCode: (errorCode: string): EventProps => ({ error_code: errorCode }),
 };
+
+export type SendFormFieldName =
+  | 'amount'
+  | 'asset'
+  | 'expiration'
+  | 'recipient_name'
+  | 'message';
+
+export interface SendFormFieldChangedProps {
+  fieldName: SendFormFieldName;
+  assetType?: string;
+  expiryDays?: ExpiryDays | number;
+}
 
 interface ClaimVerifiedProps {
   claimId: string;
@@ -574,29 +588,46 @@ export const analytics = {
   claimPageViewed: ({ claimId, entryChannel }: { claimId: string; entryChannel: ClaimEntryChannel }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
     }),
   claimInitiated: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   claimSuccess: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   claimError: ({ claimId, assetType, errorCode = 'unknown', errorType, attemptNumber }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
-      error_code: errorCode,
-      error_type: errorType,
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...conditional.errorCode(errorCode),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
+    }),
+  /**
+   * §4.2 Send Form Field Changed — fires when the sender changes a field value
+   * and moves focus away (blur). Not fired on every keystroke.
+   */
+  sendFormFieldChanged: ({
+    fieldName,
+    assetType,
+    expiryDays,
+  }: SendFormFieldChangedProps) =>
+    track('Send Form Field Changed', {
+      journey: 'sender',
+      field_name: fieldName,
+      ...(fieldName === 'asset' && assetType ? conditional.assetType(assetType) : {}),
+      ...(fieldName === 'expiration' && expiryDays !== undefined
+        ? conditional.expiryDays(expiryDays)
+        : {}),
     }),
   sendFormCompleted: ({
     assetType,
@@ -611,8 +642,8 @@ export const analytics = {
   }) =>
     track('Send Form Completed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       has_recipient_name: hasRecipientName,
       has_message: hasMessage,
     }),
@@ -625,8 +656,16 @@ export const analytics = {
   }) =>
     track('Payment Confirmation Viewed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
+    }),
+  /**
+   * §4.3 Wallet Connection Failed — fires when wallet connection is attempted but fails.
+   */
+  walletConnectionFailed: ({ errorCode = 'unknown' }: { errorCode?: string } = {}) =>
+    track('Wallet Connection Failed', {
+      journey: 'sender',
+      ...conditional.errorCode(errorCode),
     }),
   paymentConfirmed: ({
     assetType,
@@ -639,8 +678,8 @@ export const analytics = {
   }) =>
     track('Payment Confirmed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       ...(walletType ? { wallet_type: walletType } : {}),
     }),
   paymentCreated: ({
@@ -656,10 +695,25 @@ export const analytics = {
   }) =>
     track('Payment Created', {
       journey: 'sender',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       confirmation_time_ms: confirmationTimeMs,
+    }),
+  /**
+   * §4.4 Payment Creation Failed — fires when payment creation transaction fails.
+   */
+  paymentCreationFailed: ({
+    errorCode = 'unknown',
+    assetType,
+  }: {
+    errorCode?: string;
+    assetType?: string;
+  } = {}) =>
+    track('Payment Creation Failed', {
+      journey: 'sender',
+      ...conditional.errorCode(errorCode),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   claimLinkCopied: ({
     claimId,
@@ -670,13 +724,13 @@ export const analytics = {
   }) =>
     track('Claim Link Copied', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       copy_location: copyLocation,
     }),
   claimLinkShared: ({ claimId, shareMethod }: { claimId: string; shareMethod: ShareMethod }) =>
     track('Claim Link Shared', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       share_method: shareMethod,
     }),
   claimPageOpened: ({
@@ -688,7 +742,7 @@ export const analytics = {
   }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
     }),
   paymentDetailsViewed: ({
@@ -700,7 +754,7 @@ export const analytics = {
   }) =>
     track('Payment Details Viewed', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       claim_status: claimStatus,
     }),
   pageViewed: ({ page, entrySource }: { page: string; entrySource?: EntrySource }) =>
@@ -738,7 +792,7 @@ export const analytics = {
   }: ErrorDisplayedProps) =>
     track('Error Displayed', {
       journey,
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       ...conditional.errorType(errorType),
       ...conditional.errorCode(errorCode ?? 'unknown'),
       source_screen: sourceScreen,
@@ -750,15 +804,15 @@ export const analytics = {
   }: WalletAddressValidationFailedProps) =>
     track('Wallet Address Validation Failed', {
       journey: 'recipient',
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       validation_error: validationError,
       attempt_number: attemptNumber,
     }),
   claimConfirmationViewed: ({ claimId, assetType }: ClaimCtaClickedProps) =>
     track('Claim Confirmation Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
 
   /**
@@ -774,8 +828,8 @@ export const analytics = {
   }: RetryClickedProps) =>
     track('Retry Clicked', {
       journey,
-      ...(claimId != null ? { claim_id: claimId } : {}),
-      error_type: errorType,
+      ...(claimId != null ? conditional.claimId(claimId) : {}),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
     }),
 
@@ -792,10 +846,10 @@ export const analytics = {
   }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
-      error_code: errorCode,
-      error_type: errorType,
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...conditional.errorCode(errorCode),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
     }),
 
@@ -805,8 +859,8 @@ export const analytics = {
   claimSuccessViewed: ({ claimId, assetType }: ClaimSuccessViewedProps) =>
     track('Claim Success Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
 
   /**
@@ -816,7 +870,7 @@ export const analytics = {
   senderSignupCtaClicked: ({ claimId }: SenderSignupCtaClickedProps) =>
     track('Sender Signup CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source: 'claim_success_screen',
     }),
 
@@ -827,14 +881,14 @@ export const analytics = {
   explorerLinkClicked: ({ journey, claimId, sourceScreen }: ExplorerLinkClickedProps) =>
     track('Explorer Link Clicked', {
       journey,
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source_screen: sourceScreen,
     }),
   claimSubmitted: ({ claimId, assetType }: ClaimCtaClickedProps) =>
     track('Claim Submitted', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   claimSucceeded: ({
     claimId,
@@ -845,8 +899,8 @@ export const analytics = {
   }: ClaimSucceededProps) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...conditional.claimId(claimId),
+      ...(assetType ? conditional.assetType(assetType) : {}),
       ...(timeToClaimHours !== undefined ? { time_to_claim_hours: timeToClaimHours } : {}),
       ...(sweepDurationMs !== undefined ? { sweep_duration_ms: sweepDurationMs } : {}),
       entry_channel: entryChannel,
